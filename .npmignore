@@ -1,0 +1,13 @@
+!index.js
+.babelrc
+.DS_store
+.env*
+.eslintrc
+.gitignore
+.prettierrc
+/.github
+/*.js
+/lib
+node_modules
+src
+yarn.lock

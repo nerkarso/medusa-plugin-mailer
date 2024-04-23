@@ -1,0 +1,12 @@
+!index.js
+!jest.config.js
+.DS_store
+.env*
+/*.js
+/api
+/dist
+/lib
+/models
+/services
+/subscribers
+node_modules
