@@ -1,7 +1,10 @@
+import { render } from '@react-email/render';
 import Email from 'email-templates';
+import fs from 'fs';
 import { humanizeAmount, zeroDecimalCurrencies } from 'medusa-core-utils';
 import { NotificationService } from 'medusa-interfaces';
 import nodemailer from 'nodemailer';
+import path from 'path';
 
 class SmtpService extends NotificationService {
   static identifier = 'smtp';
@@ -290,34 +293,23 @@ class SmtpService extends NotificationService {
    */
   async sendEmail(options) {
     try {
-      const email = new Email({
-        message: {
-          from: this.options_.fromEmail,
-        },
-        transport: this.transporter,
-        views: {
-          root: this.options_.emailTemplatePath,
-        },
-        send: true,
+      const transporter = nodemailer.createTransport(this.options_.transport);
+
+      // TODO add support for other type of templates
+      const reactTemplate = await this.compileReactTemplate(options.template_id, options.data);
+      const emailHtml = render(reactTemplate);
+
+      const status = await transporter.sendMail({
+        from: options.from,
+        to: options.to,
+        subject: options.subject,
+        html: emailHtml,
       });
-      const status = await email
-        .send({
-          template: options.templateName,
-          message: {
-            to: options.to,
-          },
-          locals: {
-            data: options,
-            env: process.env,
-          },
-        })
-        .then(() => 'sent')
-        .catch(() => 'failed');
 
       return {
         to: options.to,
         status,
-        data: options,
+        data: options.data,
       };
     } catch (error) {
       throw error;
@@ -1076,6 +1068,13 @@ class SmtpService extends NotificationService {
       }
     }
     return null;
+  }
+
+  async compileReactTemplate(templateId, data) {
+    if (fs.existsSync(path.join(this.options_.emailTemplatePath, templateId, 'html.js'))) {
+      let EmailTemplate = await import(path.join(this.options_.emailTemplatePath, templateId, 'html.js'));
+      return EmailTemplate.default(data);
+    }
   }
 }
 

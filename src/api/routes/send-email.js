@@ -17,8 +17,8 @@ export default async (req, res) => {
   const value = req.body;
   try {
     const smtpService = req.scope.resolve('smtpService');
-    await smtpService.sendEmail(value.template_id, value.from, value.to, value.data);
-    res.sendStatus(200);
+    const result = await smtpService.sendEmail(value);
+    res.json(result);
   } catch (err) {
     throw err;
   }
