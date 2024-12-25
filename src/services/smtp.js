@@ -1,5 +1,4 @@
 import { render } from '@react-email/render';
-import Email from 'email-templates';
 import fs from 'fs';
 import { humanizeAmount, zeroDecimalCurrencies } from 'medusa-core-utils';
 import { NotificationService } from 'medusa-interfaces';
@@ -11,39 +10,6 @@ class SmtpService extends NotificationService {
 
   /**
    * @param {Object} options - options defined in `medusa-config.js`
-   * e.g.
-   {
-      fromEmail: "noreply@medusajs.com",
-      // this object is input directly into nodemailer.createtransport(), so anything that works there should work here
-      // see: https://nodemailer.com/smtp/#1-single-connection and https://nodemailer.com/transports/
-      transport: {
-        sendmail: true,
-        path: "/usr/sbin/sendmail",
-        newline: "unix",
-      },
-      // an example for an office365 smtp transport:
-      // {
-      //     host: "smtp.office365.com",
-      //     port: 587,
-      //     secureConnection: false,
-      //     auth: {
-      //         user: process.env.EMAIL_SENDER_ADDRESS,
-      //         pass: process.env.EMAIL_SENDER_PASS,
-      //     },
-      //     tls: {
-      //         ciphers: "SSLv3",
-      //     },
-      //     requireTLS: true,
-      // },
-      // this is the path where your email templates are stored
-      emailTemplatePath: "data/emailTemplates",
-      // this maps the folder/template name to a medusajs event to use the right template
-      // only the events that are registered here are subscribed to
-      templateMap: {
-        // "eventname": "templatename",
-        "order.placed": "orderplaced",
-      },
-    }
    */
   constructor(
     {
@@ -64,15 +30,10 @@ class SmtpService extends NotificationService {
     super();
 
     this.options_ = {
-      fromEmail: 'noreply@medusajs.com',
       transport: {
         sendmail: true,
         path: '/usr/sbin/sendmail',
         newline: 'unix',
-      },
-      emailTemplatePath: 'data/emailTemplates',
-      templateMap: {
-        'order.placed': 'orderplaced',
       },
       ...options,
     };
@@ -88,7 +49,135 @@ class SmtpService extends NotificationService {
     this.fulfillmentService_ = fulfillmentService;
     this.totalsService_ = totalsService;
     this.productVariantService_ = productVariantService;
+
     this.transporter = nodemailer.createTransport(this.options_.transport);
+  }
+
+  async sendNotification(event, eventData, attachmentGenerator) {
+    const templateId = this.getTemplateNameForEvent(event);
+
+    if (!templateId) {
+      return {
+        to: null,
+        status: 'No template found',
+        data: null,
+      };
+    }
+
+    const data = await this.fetchData(event, eventData, attachmentGenerator);
+    const attachments = await this.fetchAttachments(event, data, attachmentGenerator);
+
+    const sendOptions = {
+      template_id: templateId,
+      from: this.options_.fromEmail,
+      to: data.email,
+    };
+
+    if (fs.existsSync(path.join(this.options_.emailTemplatePath, templateId, 'subject.txt'))) {
+      sendOptions.subject = fs.readFileSync(path.join(this.templatePath_, templateId, 'subject.txt'), 'utf8');
+    }
+
+    if (attachments?.length) {
+      sendOptions.attachments = attachments.map((a) => {
+        return {
+          content: a.base64,
+          filename: a.name,
+          type: a.type,
+          disposition: 'attachment',
+          contentId: a.name,
+        };
+      });
+    }
+
+    const status = await this.sendEmail(sendOptions);
+
+    delete sendOptions.attachments;
+
+    return status;
+  }
+
+  async resendNotification(notification, config, attachmentGenerator) {
+    const templateId = this.getTemplateNameForEvent(notification.event_name);
+
+    if (!templateId) {
+      return {
+        to: notification.to,
+        status: 'No template found',
+        data: notification.data,
+      };
+    }
+
+    const sendOptions = {
+      template_id: templateId,
+      from: this.options_.fromEmail,
+      to: config.to || notification.to,
+    };
+
+    const attachments = await this.fetchAttachments(
+      notification.event_name,
+      notification.data.dynamic_template_data,
+      attachmentGenerator
+    );
+
+    if (attachments.length) {
+      sendOptions.attachments = attachments.map((a) => {
+        return {
+          content: a.base64,
+          filename: a.name,
+          type: a.type,
+          disposition: 'attachment',
+          contentId: a.name,
+        };
+      });
+    }
+
+    const status = await this.sendEmail(sendOptions);
+
+    delete sendOptions.attachments;
+
+    return status;
+  }
+
+  /**
+   * Sends an email using smtp.
+   *
+   * @return {Promise} result of the send operation
+   */
+  async sendEmail(options) {
+    try {
+      const reactTemplate = await this.compileReactTemplate(options.template_id, options.data);
+      const emailHtml = render(reactTemplate);
+
+      /** @type {import('nodemailer').SendMailOptions} */
+      const mailOptions = {
+        from: options.from,
+        to: options.to,
+        subject: options.subject,
+        html: emailHtml,
+      };
+
+      if (options.replyTo) mailOptions.cc = options.replyTo;
+      if (options.cc) mailOptions.cc = options.cc;
+      if (options.text) mailOptions.cc = options.text;
+
+      const status = await this.transporter.sendMail(mailOptions);
+
+      return {
+        to: options.to,
+        status,
+        data: options.data,
+      };
+    } catch (error) {
+      return {
+        to: null,
+        status: error.message,
+        data: null,
+      };
+    }
+  }
+
+  getTemplateNameForEvent(eventName) {
+    return this.options_.templateMap[eventName] || false;
   }
 
   async fetchAttachments(event, data, attachmentGenerator) {
@@ -161,158 +250,6 @@ class SmtpService extends NotificationService {
         return await this.restockNotificationData(eventData, attachmentGenerator);
       default:
         return eventData;
-    }
-  }
-
-  getTemplateNameForEvent(eventName) {
-    return this.options_.templateMap[eventName] || false;
-  }
-
-  async sendNotification(event, eventData, attachmentGenerator) {
-    let templateName = this.getTemplateNameForEvent(event);
-
-    if (!templateName) {
-      return {
-        to: '',
-        status: 'noDataFound',
-        data: {},
-      };
-    }
-
-    const data = await this.fetchData(event, eventData, attachmentGenerator);
-    const attachments = await this.fetchAttachments(event, data, attachmentGenerator);
-
-    const sendOptions = {
-      template: templateName,
-      message: {
-        to: data.email,
-      },
-      locals: {
-        data: data,
-        env: process.env,
-      },
-    };
-
-    if (attachments?.length) {
-      sendOptions.message.attachments = attachments.map((a) => {
-        return {
-          content: a.base64,
-          filename: a.name,
-          type: a.type,
-          disposition: 'attachment',
-          contentId: a.name,
-        };
-      });
-    }
-
-    const email = new Email({
-      message: {
-        from: this.options_.fromEmail,
-      },
-      transport: this.transporter,
-      views: {
-        root: this.options_.emailTemplatePath,
-      },
-      send: true,
-    });
-
-    const status = await email
-      .send(sendOptions)
-      .then(() => 'sent')
-      .catch(() => 'failed');
-    delete sendOptions.message.attachments;
-    return {
-      to: sendOptions.message.to,
-      status,
-      data: sendOptions.locals.data || {},
-    };
-  }
-
-  async resendNotification(notification, config, attachmentGenerator) {
-    let templateName = this.getTemplateNameForEvent(notification.event_name);
-    if (!templateName) {
-      return {
-        to: notification.to,
-        status: 'noTemplateFound',
-        data: notification.data,
-      };
-    }
-    const sendOptions = {
-      template: templateName,
-      message: {
-        to: config.to || notification.to,
-      },
-      locals: {
-        data: notification.data,
-        env: process.env,
-      },
-    };
-
-    const attachments = await this.fetchAttachments(
-      notification.event_name,
-      notification.data.dynamic_template_data,
-      attachmentGenerator
-    );
-
-    sendOptions.message.attachments = attachments.map((a) => {
-      return {
-        content: a.base64,
-        filename: a.name,
-        type: a.type,
-        disposition: 'attachment',
-        contentId: a.name,
-      };
-    });
-
-    const email = new Email({
-      message: {
-        from: this.options_.fromEmail,
-      },
-      transport: this.transporter,
-      views: {
-        root: this.options_.emailTemplatePath,
-      },
-      send: true,
-    });
-    const status = await email
-      .send(sendOptions)
-      .then(() => 'sent')
-      .catch(() => 'failed');
-    delete sendOptions.message.attachments;
-    return {
-      to: sendOptions.message.to,
-      status,
-      data: sendOptions.locals.data || {},
-    };
-  }
-
-  /**
-   * Sends an email using smtp.
-   *
-   * @return {Promise} result of the send operation
-   */
-  async sendEmail(options) {
-    try {
-      const transporter = nodemailer.createTransport(this.options_.transport);
-
-      // TODO add support for other type of templates
-      const reactTemplate = await this.compileReactTemplate(options.template_id, options.data);
-      const emailHtml = render(reactTemplate);
-
-      const status = await transporter.sendMail({
-        from: options.from,
-        to: options.to,
-        subject: options.subject,
-        html: emailHtml,
-      });
-
-      return {
-        to: options.to,
-        status,
-        data: options.data,
-      };
-    } catch (error) {
-      throw error;
     }
   }
 
